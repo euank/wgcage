@@ -10,15 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/alexflint/go-arg"
-	"github.com/joemiller/certin"
-	"github.com/monasticacademy/httptap/pkg/certfile"
 	"github.com/monasticacademy/httptap/pkg/overlay"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
@@ -168,51 +165,7 @@ func run(ctx context.Context) error {
 		return nil
 	}
 
-	slog.Debug(fmt.Sprintf("at second stage, creating certificate authority..."))
-
-	// generate a root certificate authority
-	ca, err := certin.NewCert(nil, certin.Request{CN: "root CA", IsCA: true})
-	if err != nil {
-		return fmt.Errorf("error creating root CA: %w", err)
-	}
-
-	// create a temporary directory
-	tempdir, err := os.MkdirTemp("", "")
-	if err != nil {
-		return fmt.Errorf("error creating temporary directory: %w", err)
-	}
-	defer os.RemoveAll(tempdir)
-
-	// marshal certificate authority to PEM format
-	caPEM, err := certfile.MarshalPEM(ca.Certificate)
-	if err != nil {
-		return fmt.Errorf("error marshaling certificate authority to PEM format: %w", err)
-	}
-
-	// write certificate authority to PEM file
-	caPath := filepath.Join(tempdir, "ca-certificates.crt")
-	err = os.WriteFile(caPath, caPEM, 0o666)
-	if err != nil {
-		return fmt.Errorf("error writing certificate authority to temporary PEM file: %w", err)
-	}
-	slog.Debug(fmt.Sprintf("created %v", caPath))
-
-	// write certificate authority to another common PEM file
-	caPath2 := filepath.Join(tempdir, "ca-bundle.crt")
-	err = os.WriteFile(caPath2, caPEM, 0o666)
-	if err != nil {
-		return fmt.Errorf("error writing certificate authority to temporary PEM file: %w", err)
-	}
-	slog.Debug(fmt.Sprintf("created %v", caPath2))
-
-	// write the certificate authority to a temporary PKCS12 file
-	// write certificate authority to PEM file
-	caPathPKCS12 := filepath.Join(tempdir, "ca-certificates.pkcs12")
-	err = certfile.WritePKCS12(caPathPKCS12, ca.Certificate)
-	if err != nil {
-		return fmt.Errorf("error writing certificate authority to temporary PEM file: %w", err)
-	}
-	slog.Debug(fmt.Sprintf("created %v", caPathPKCS12))
+	slog.Debug("at second stage")
 
 	// lock the OS thread because network and mount namespaces are specific to a single OS thread
 	runtime.LockOSThread()
