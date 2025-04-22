@@ -16,7 +16,7 @@ import (
 	"syscall"
 
 	"github.com/alexflint/go-arg"
-	"github.com/monasticacademy/httptap/pkg/overlay"
+	"github.com/euank/wgcage/pkg/overlay"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -42,14 +42,20 @@ const (
 func run(ctx context.Context) error {
 	var args struct {
 		Tun       string `default:"wgcage" help:"name of the TUN device that will be created"`
-		Subnet    string `default:"10.1.1.100/24" help:"IP address of the network interface that the subprocess will see"`
-		Gateway   string `default:"10.1.1.1" help:"IP address of the gateway that intercepts and proxies network packets"`
+		Subnet    string `default:"10.1.2.100/24" help:"IP address of the network interface that the subprocess will see"`
+		Gateway   string `default:"10.1.2.1" help:"IP address of the gateway that intercepts and proxies network packets"`
 		UID       int
 		GID       int
-		User      string   `help:"run command as this user (username or id)"`
-		NoOverlay bool     `arg:"--no-overlay,env:HTTPTAP_NO_OVERLAY" help:"do not mount any overlay filesystems"`
-		Stack     string   `arg:"env:HTTPTAP_STACK" default:"gvisor" help:"which tcp implementation to use: 'gvisor' or 'homegrown'"`
-		Command   []string `arg:"positional"`
+		User      string `help:"run command as this user (username or id)"`
+		NoOverlay bool   `arg:"--no-overlay,env:HTTPTAP_NO_OVERLAY" help:"do not mount any overlay filesystems"`
+		Stack     string `arg:"env:HTTPTAP_STACK" default:"gvisor" help:"which tcp implementation to use: 'gvisor' or 'homegrown'"`
+
+		WgPubKey      string `arg:"--wg-public-key" help:"wireguard server public key"`
+		WgPrivKeyFile string `arg:"--wg-private-key-file" help:"wireguard private key file"`
+		WgEndpoint    string `arg:"--wg-endpoint" help:"wireguard server endpoint"`
+		WgIP          string `arg:"--wg-address" help:"our wireguard address (i.e. the 'allowed_ips' the server has for this peer)"`
+
+		Command []string `arg:"positional"`
 	}
 	arg.MustParse(&args)
 
@@ -166,6 +172,19 @@ func run(ctx context.Context) error {
 	}
 
 	slog.Debug("at second stage")
+
+	if args.WgEndpoint == "" {
+		return fmt.Errorf("--wg-endpoint is required")
+	}
+	if args.WgPubKey == "" {
+		return fmt.Errorf("--wg-public-key is required")
+	}
+	if args.WgPrivKeyFile == "" {
+		return fmt.Errorf("--wg-private-key-file is required")
+	}
+	if args.WgPrivKeyFile == "" {
+		return fmt.Errorf("--wg-private-key-file is required")
+	}
 
 	// lock the OS thread because network and mount namespaces are specific to a single OS thread
 	runtime.LockOSThread()
@@ -309,11 +328,21 @@ func run(ctx context.Context) error {
 		defer mount.Remove()
 	}
 
+	privKey, err := os.ReadFile(args.WgPrivKeyFile)
+	if err != nil {
+		return fmt.Errorf("could not read %s: %w", args.WgPrivKeyFile, err)
+	}
+	// create wireguard tun
+	proxy, err := newWgProxy(args.WgIP, string(privKey), args.WgPubKey, args.WgEndpoint)
+	if err != nil {
+		return fmt.Errorf("could not make wg prox: %w", err)
+	}
+
 	// set up environment variables for the subprocess
 	env := append(
 		os.Environ(),
 		"PS1=WGCAGE # ",
-		"HTTPTAP=1",
+		"WGCAGE=1",
 	)
 
 	slog.Debug("running subcommand now ================")
@@ -327,40 +356,16 @@ func run(ctx context.Context) error {
 	// the application-level thing is the mux, which distributes new connections according to patterns
 	var mux mux
 
-	// handle DNS queries by calling net.Resolve
-	mux.HandleUDP(":53", func(conn net.Conn) {
-		defer conn.Close()
-		for {
-			// allocate new buffer on each iteration for now because different handlers for each packet
-			// are started asynchronously
-			payload := make([]byte, link.Attrs().MTU)
-			n, err := conn.Read(payload)
-			if err == net.ErrClosed {
-				slog.Debug("UDP connection closed, exiting the read loop")
-				break
-			}
-			if err != nil {
-				slog.Debug(fmt.Sprintf("error reading udp packet with conn.ReadFrom: %v, ignoring", err))
-				continue
-			}
-
-			slog.Debug(fmt.Sprintf("read a UDP packet with %d bytes", n))
-
-			// handle the DNS query asynchronously
-			go handleDNS(context.Background(), conn, payload)
-		}
-	})
-
 	// listen for other TCP connections and proxy to the world
 	mux.HandleTCP("*", func(conn net.Conn) {
 		dst := conn.LocalAddr().String()
-		proxyConn("tcp", dst, conn)
+		proxy.ProxyConn("tcp", dst, conn)
 	})
 
 	// listen for other UDP connections and proxy to the world
 	mux.HandleUDP("*", func(conn net.Conn) {
 		dst := conn.LocalAddr().String()
-		proxyConn("udp", dst, conn)
+		proxy.ProxyConn("tcp", dst, conn)
 	})
 
 	switch strings.ToLower(args.Stack) {
