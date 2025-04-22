@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"strings"
+	"log/slog"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -20,18 +20,10 @@ func copyToDevice(ctx context.Context, dst *water.Interface, src chan []byte) er
 		case packet := <-src:
 			_, err := dst.Write(packet)
 			if err != nil {
-				errorf("error writing %d bytes to tun: %v, dropping and continuing...", len(packet), err)
+				slog.Error("error writing to tun: dropping and continuing...", "bytes", len(packet), "err", err)
 			}
 
-			if dumpPacketsToSubprocess {
-				reply := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.Default)
-				verbose(strings.Repeat("\n", 3))
-				verbose(strings.Repeat("=", 80))
-				verbose("To subprocess:")
-				verbose(reply.Dump())
-			} else {
-				verbosef("transmitting %v raw bytes to subprocess", len(packet))
-			}
+			slog.Debug("sending bytes to subprocess", "bytes", len(packet))
 		}
 	}
 }
@@ -44,7 +36,7 @@ func readFromDevice(ctx context.Context, tun *water.Interface, tcpstack *tcpStac
 		// read a packet (TODO: implement non-blocking read on the file descriptor, check for context cancellation)
 		n, err := tun.Read(buf)
 		if err != nil {
-			errorf("error reading a packet from tun: %v, ignoring", err)
+			slog.Error("error reading a packet from tun, ignoring", "err", err)
 			continue
 		}
 
@@ -60,19 +52,12 @@ func readFromDevice(ctx context.Context, tun *water.Interface, tcpstack *tcpStac
 			continue
 		}
 
-		if dumpPacketsFromSubprocess {
-			verbose(strings.Repeat("\n", 3))
-			verbose(strings.Repeat("=", 80))
-			verbose("From subprocess:")
-			verbose(packet.Dump())
-		}
-
 		if isTCP {
-			verbosef("received from subprocess: %v", summarizeTCP(ipv4, tcp, tcp.Payload))
+			slog.Debug("received from subprocess", "summary", summarizeTCP(ipv4, tcp, tcp.Payload))
 			tcpstack.handlePacket(ipv4, tcp, tcp.Payload)
 		}
 		if isUDP {
-			verbosef("received from subprocess: %v", summarizeUDP(ipv4, udp, udp.Payload))
+			slog.Debug("received udp from subprocess", "summary", summarizeUDP(ipv4, udp, udp.Payload))
 			udpstack.handlePacket(ipv4, udp, udp.Payload)
 		}
 	}

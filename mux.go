@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -84,7 +86,7 @@ func (s *mux) HandleTCP(pattern string, handler tcpHandlerFunc) {
 	s.HandleTCPRequest(pattern, func(r TCPRequest) {
 		conn, err := r.Accept()
 		if err != nil {
-			errorf("error accepting connection: %v", err)
+			slog.Error(fmt.Sprintf("error accepting connection: %v", err))
 			return
 		}
 		handler(conn)
@@ -137,7 +139,7 @@ func (s *mux) notifyTCP(req TCPRequest) {
 		}
 	}
 
-	verbosef("nobody listening for tcp to %v, dropping", req.LocalAddr())
+	slog.Debug(fmt.Sprintf("nobody listening for tcp to %v, dropping", req.LocalAddr()))
 }
 
 // notifyUDP is called when a new packet arrives. It finds the first handler
@@ -153,7 +155,7 @@ func (s *mux) notifyUDP(conn net.Conn) {
 		}
 	}
 
-	verbosef("nobody listening for udp to %v, dropping!", conn.LocalAddr())
+	slog.Debug(fmt.Sprintf("nobody listening for udp to %v, dropping!", conn.LocalAddr()))
 }
 
 // udpResponder is the interface for writing back UDP packets
@@ -181,13 +183,13 @@ func (l *tcpListener) Accept() (net.Conn, error) {
 // for net.Listener interface
 func (l *tcpListener) Close() error {
 	// TODO: unregister from the stack, then close(l.connections)
-	verbose("tcpListener.Close() not implemented, ignoring")
+	slog.Debug("tcpListener.Close() not implemented, ignoring")
 	return nil
 }
 
 // for net.Listener interface, returns our side of the connection
 func (l *tcpListener) Addr() net.Addr {
-	verbose("tcpListener.Addr() was called, returning bogus address 0.0.0.0:0")
+	slog.Debug("tcpListener.Addr() was called, returning bogus address 0.0.0.0:0")
 	// in truth we do not have a real address -- we listen for anything going anywhere
 	return &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0}
 }

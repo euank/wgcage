@@ -2,33 +2,23 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/alexflint/go-arg"
-	"github.com/fatih/color"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/joemiller/certin"
-	"github.com/mdlayher/packet"
 	"github.com/monasticacademy/httptap/pkg/certfile"
-	"github.com/monasticacademy/httptap/pkg/harlog"
-	"github.com/monasticacademy/httptap/pkg/opensslpaths"
 	"github.com/monasticacademy/httptap/pkg/overlay"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
@@ -52,85 +42,27 @@ const (
 	ttl                       = 10
 )
 
-var isVerbose bool
-
-func verbose(msg string) {
-	if isVerbose {
-		log.Print(msg)
-	}
-}
-
-func verbosef(fmt string, parts ...interface{}) {
-	if isVerbose {
-		log.Printf(fmt, parts...)
-	}
-}
-
-var errorColor = color.New(color.FgRed, color.Bold)
-
-func errorf(fmt string, parts ...interface{}) {
-	if !strings.HasSuffix(fmt, "\n") {
-		fmt += "\n"
-	}
-	errorColor.Printf(fmt, parts...)
-}
-
-func printVersion() {
-	version := "unknown"
-
-	buildInfo, ok := debug.ReadBuildInfo()
-	if ok && buildInfo.Main.Version != "" {
-		version = buildInfo.Main.Version
-	}
-
-	fmt.Printf("Version: %s\n", version)
-}
-
-func Main() error {
-	ctx := context.Background()
+func run(ctx context.Context) error {
 	var args struct {
-		Verbose            bool   `arg:"-v,--verbose,env:HTTPTAP_VERBOSE"`
-		Version            bool   `arg:"-V,--version" help:"print version information"`
-		NoNewUserNamespace bool   `arg:"--no-new-user-namespace,env:HTTPTAP_NO_NEW_USER_NAMESPACE" help:"do not create a new user namespace (must be run as root)"`
-		Stderr             bool   `arg:"env:HTTPTAP_LOG_TO_STDERR" help:"log to standard error (default is standard out)"`
-		Tun                string `default:"httptap" help:"name of the TUN device that will be created"`
-		Subnet             string `default:"10.1.1.100/24" help:"IP address of the network interface that the subprocess will see"`
-		Gateway            string `default:"10.1.1.1" help:"IP address of the gateway that intercepts and proxies network packets"`
-		UID                int
-		GID                int
-		User               string   `help:"run command as this user (username or id)"`
-		NoOverlay          bool     `arg:"--no-overlay,env:HTTPTAP_NO_OVERLAY" help:"do not mount any overlay filesystems"`
-		Stack              string   `arg:"env:HTTPTAP_STACK" default:"gvisor" help:"which tcp implementation to use: 'gvisor' or 'homegrown'"`
-		DumpTCP            bool     `arg:"--dump-tcp,env:HTTPTAP_DUMP_TCP" help:"dump all TCP packets sent and received to standard out"`
-		DumpHAR            string   `arg:"--dump-har,env:HTTPTAP_DUMP_HAR" help:"path to dump HAR capture to"`
-		HTTPPorts          []int    `arg:"--http" help:"list of TCP ports to intercept HTTP traffic on"`
-		HTTPSPorts         []int    `arg:"--https" help:"list of TCP ports to intercept HTTPS traffic on"`
-		Head               bool     `help:"whether to include HTTP headers in terminal output"`
-		Body               bool     `help:"whether to include HTTP payloads in terminal output"`
-		PrintDNS           bool     `arg:"--print-dns" help:"whether to print DNS queries and responses"`
-		Command            []string `arg:"positional"`
+		Tun       string `default:"wgcage" help:"name of the TUN device that will be created"`
+		Subnet    string `default:"10.1.1.100/24" help:"IP address of the network interface that the subprocess will see"`
+		Gateway   string `default:"10.1.1.1" help:"IP address of the gateway that intercepts and proxies network packets"`
+		UID       int
+		GID       int
+		User      string   `help:"run command as this user (username or id)"`
+		NoOverlay bool     `arg:"--no-overlay,env:HTTPTAP_NO_OVERLAY" help:"do not mount any overlay filesystems"`
+		Stack     string   `arg:"env:HTTPTAP_STACK" default:"gvisor" help:"which tcp implementation to use: 'gvisor' or 'homegrown'"`
+		Command   []string `arg:"positional"`
 	}
-	args.HTTPPorts = []int{80}
-	args.HTTPSPorts = []int{443}
 	arg.MustParse(&args)
-
-	if args.Version {
-		printVersion()
-		return nil
-	}
 
 	if len(args.Command) == 0 {
 		args.Command = []string{"/bin/sh"}
 	}
-	if args.Stderr {
-		log.SetOutput(os.Stderr)
-	}
-
-	isVerbose = args.Verbose
 
 	// first we re-exec ourselves in a new user namespace
-	if !strings.HasPrefix(os.Args[0], "httptap.stage.") && !args.NoNewUserNamespace {
-		verbosef("at first stage, launching second stage in a new user namespace...")
+	if !strings.HasPrefix(os.Args[0], "httptap.stage.") {
+		slog.Debug(fmt.Sprintf("at first stage, launching second stage in a new user namespace..."))
 
 		// Decide which user and group we should later switch to. We must do this before creating the user
 		// namespace because then we will not know which user we were originally launched by.
@@ -169,7 +101,8 @@ func Main() error {
 		cmd.Args = append([]string{
 			"httptap.stage.2",
 			"--uid", strconv.Itoa(uid),
-			"--gid", strconv.Itoa(gid)},
+			"--gid", strconv.Itoa(gid),
+		},
 			os.Args[1:]...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -198,14 +131,14 @@ func Main() error {
 	}
 
 	if os.Args[0] == "httptap.stage.3" {
-		verbose("at third stage...")
+		slog.Debug("at third stage...")
 
 		// there are three (!) user/group IDs for a process: the real, effective, and saved
 		// they have the purpose of allowing the process to go "back" to them
 		// here we set just the effective, which, when you are root, sets all three
 
 		if args.GID != 0 {
-			verbosef("switching to gid %d", args.GID)
+			slog.Debug(fmt.Sprintf("switching to gid %d", args.GID))
 			err := unix.Setgid(args.GID)
 			if err != nil {
 				return fmt.Errorf("error switching to group %v: %w", args.GID, err)
@@ -213,14 +146,14 @@ func Main() error {
 		}
 
 		if args.UID != 0 {
-			verbosef("switching to uid %d", args.UID)
+			slog.Debug(fmt.Sprintf("switching to uid %d", args.UID))
 			err := unix.Setuid(args.UID)
 			if err != nil {
 				return fmt.Errorf("error switching to user %v: %w", args.UID, err)
 			}
 		}
 
-		verbosef("third stage now in uid %d, gid %d, launching final subprocess...", unix.Getuid(), unix.Getgid())
+		slog.Debug(fmt.Sprintf("third stage now in uid %d, gid %d, launching final subprocess...", unix.Getuid(), unix.Getgid()))
 
 		// launch the command that the user originally requested
 		cmd := exec.Command(args.Command[0])
@@ -235,7 +168,7 @@ func Main() error {
 		return nil
 	}
 
-	verbosef("at second stage, creating certificate authority...")
+	slog.Debug(fmt.Sprintf("at second stage, creating certificate authority..."))
 
 	// generate a root certificate authority
 	ca, err := certin.NewCert(nil, certin.Request{CN: "root CA", IsCA: true})
@@ -258,19 +191,19 @@ func Main() error {
 
 	// write certificate authority to PEM file
 	caPath := filepath.Join(tempdir, "ca-certificates.crt")
-	err = os.WriteFile(caPath, caPEM, 0666)
+	err = os.WriteFile(caPath, caPEM, 0o666)
 	if err != nil {
 		return fmt.Errorf("error writing certificate authority to temporary PEM file: %w", err)
 	}
-	verbosef("created %v", caPath)
+	slog.Debug(fmt.Sprintf("created %v", caPath))
 
 	// write certificate authority to another common PEM file
 	caPath2 := filepath.Join(tempdir, "ca-bundle.crt")
-	err = os.WriteFile(caPath2, caPEM, 0666)
+	err = os.WriteFile(caPath2, caPEM, 0o666)
 	if err != nil {
 		return fmt.Errorf("error writing certificate authority to temporary PEM file: %w", err)
 	}
-	verbosef("created %v", caPath2)
+	slog.Debug(fmt.Sprintf("created %v", caPath2))
 
 	// write the certificate authority to a temporary PKCS12 file
 	// write certificate authority to PEM file
@@ -279,7 +212,7 @@ func Main() error {
 	if err != nil {
 		return fmt.Errorf("error writing certificate authority to temporary PEM file: %w", err)
 	}
-	verbosef("created %v", caPathPKCS12)
+	slog.Debug(fmt.Sprintf("created %v", caPathPKCS12))
 
 	// lock the OS thread because network and mount namespaces are specific to a single OS thread
 	runtime.LockOSThread()
@@ -307,7 +240,7 @@ func Main() error {
 		return fmt.Errorf("error finding link for new tun device %q: %w", args.Tun, err)
 	}
 
-	verbosef("tun device has MTU %d", link.Attrs().MTU)
+	slog.Debug(fmt.Sprintf("tun device has MTU %d", link.Attrs().MTU))
 
 	// bring the link up
 	err = netlink.LinkSetUp(link)
@@ -356,7 +289,7 @@ func Main() error {
 		LinkIndex: link.Attrs().Index,
 	})
 	if err != nil {
-		verbosef("error creating default ipv6 route: %v, ignoring", err)
+		slog.Debug(fmt.Sprintf("error creating default ipv6 route: %v, ignoring", err))
 	}
 
 	// find the loopback device
@@ -372,48 +305,48 @@ func Main() error {
 	}
 
 	// if --dump was provided then start watching everything
-	if args.DumpTCP {
-		iface, err := net.InterfaceByName(args.Tun)
-		if err != nil {
-			return err
-		}
+	// if args.DumpTCP {
+	//	iface, err := net.InterfaceByName(args.Tun)
+	//	if err != nil {
+	//		return err
+	//	}
 
-		// packet.Raw means listen for raw IP packets (requires root permissions)
-		// unix.ETH_P_ALL means listen for all packets
-		conn, err := packet.Listen(iface, packet.Raw, unix.ETH_P_ALL, nil)
-		if err != nil {
-			if errors.Is(err, unix.EPERM) {
-				return fmt.Errorf("you need root permissions to read raw packets (%w)", err)
-			}
-			return fmt.Errorf("error listening for raw packet: %w", err)
-		}
+	//	// packet.Raw means listen for raw IP packets (requires root permissions)
+	//	// unix.ETH_P_ALL means listen for all packets
+	//	conn, err := packet.Listen(iface, packet.Raw, unix.ETH_P_ALL, nil)
+	//	if err != nil {
+	//		if errors.Is(err, unix.EPERM) {
+	//			return fmt.Errorf("you need root permissions to read raw packets (%w)", err)
+	//		}
+	//		return fmt.Errorf("error listening for raw packet: %w", err)
+	//	}
 
-		// set promiscuous mode so that we see everything
-		err = conn.SetPromiscuous(true)
-		if err != nil {
-			return fmt.Errorf("error setting raw packet connection to promiscuous mode: %w", err)
-		}
+	//	// set promiscuous mode so that we see everything
+	//	err = conn.SetPromiscuous(true)
+	//	if err != nil {
+	//		return fmt.Errorf("error setting raw packet connection to promiscuous mode: %w", err)
+	//	}
 
-		go func() {
-			// read packets forever
-			buf := make([]byte, iface.MTU)
-			for {
-				n, _, err := conn.ReadFrom(buf)
-				if err != nil {
-					log.Printf("error reading raw packet: %v, aborting dump", err)
-					return
-				}
+	//	go func() {
+	//		// read packets forever
+	//		buf := make([]byte, iface.MTU)
+	//		for {
+	//			n, _, err := conn.ReadFrom(buf)
+	//			if err != nil {
+	//				log.Printf("error reading raw packet: %v, aborting dump", err)
+	//				return
+	//			}
 
-				// decode and dump
-				packet := gopacket.NewPacket(buf[:n], layers.LayerTypeIPv4, gopacket.NoCopy)
-				log.Println(packet.Dump())
-			}
-		}()
-	}
+	//			// decode and dump
+	//			packet := gopacket.NewPacket(buf[:n], layers.LayerTypeIPv4, gopacket.NoCopy)
+	//			log.Println(packet.Dump())
+	//		}
+	//	}()
+	//}
 
 	// if /etc/ is a directory then set up an overlay
 	if st, err := os.Lstat("/etc"); err == nil && st.IsDir() && !args.NoOverlay {
-		verbose("overlaying /etc ...")
+		slog.Debug("overlaying /etc ...")
 
 		// overlay resolv.conf
 		mount, err := overlay.Mount("/etc", overlay.File("resolv.conf", []byte("nameserver "+args.Gateway+"\n")))
@@ -423,114 +356,20 @@ func Main() error {
 		defer mount.Remove()
 	}
 
-	// overlay common certificate authority file locations
-	var caLocations = []string{"/etc/ssl/certs/ca-certificates.crt"}
-	for _, path := range caLocations {
-		if st, err := os.Lstat(path); err == nil && st.Mode().IsRegular() && !args.NoOverlay {
-			verbosef("overlaying %v...", path)
-			mount, err := overlay.Mount(filepath.Dir(path), overlay.File(filepath.Base(path), caPEM))
-			if err != nil {
-				return fmt.Errorf("error setting up overlay: %w", err)
-			}
-			defer mount.Remove()
-		}
-	}
-
-	// start printing HTTP calls to standard output
-	httpcalls, _ := listenHTTP()
-	go func() {
-		reqcolor := color.New(color.FgBlue, color.Bold)
-		resp2xx := color.New(color.FgGreen)
-		resp3xx := color.New(color.FgMagenta)
-		resp4xx := color.New(color.FgYellow)
-		resp5xx := color.New(color.FgRed)
-		for c := range httpcalls {
-			// log the request (do not do this earlier since reqbody may not be compete until now)
-			reqcolor.Printf("---> %v %v\n", c.Request.Method, c.Request.URL)
-			if args.Head {
-				for k, vs := range c.Request.Header {
-					for _, v := range vs {
-						log.Printf("> %s: %s", k, v)
-					}
-				}
-			}
-			if args.Body && len(c.Request.Body) > 0 {
-				log.Println(string(c.Request.Body))
-			}
-
-			// log the response
-			var respcolor *color.Color
-			switch {
-			case c.Response.StatusCode < 300:
-				respcolor = resp2xx
-			case c.Response.StatusCode < 400:
-				respcolor = resp3xx
-			case c.Response.StatusCode < 500:
-				respcolor = resp4xx
-			default:
-				respcolor = resp5xx
-			}
-			respcolor.Printf("<--- %v %v (%d bytes)\n", c.Response.StatusCode, c.Request.URL, len(c.Response.Body))
-			if args.Head {
-				for k, vs := range c.Response.Header {
-					for _, v := range vs {
-						log.Printf("< %s: %s", k, v)
-					}
-				}
-			}
-			if args.Body && len(c.Response.Body) > 0 {
-				log.Println(string(c.Response.Body))
-			}
-		}
-	}()
-
-	// start printing DNS class to standard output
-	if args.PrintDNS {
-		dnsReqColor := color.New(color.FgBlue)
-		dnsRespColor := color.New(color.FgMagenta)
-		watchDNS(func(c *dnsCall) {
-			for _, q := range c.queries {
-				dnsReqColor.Printf("---> DNS %s (%s)\n", q.Query(), q.Type())
-				dnsRespColor.Printf("<--- %s\n", strings.Join(q.Answers(), ", "))
-			}
-		})
-	}
-
 	// set up environment variables for the subprocess
 	env := append(
 		os.Environ(),
-		"PS1=HTTPTAP # ",
+		"PS1=WGCAGE # ",
 		"HTTPTAP=1",
-		"CURL_CA_BUNDLE="+caPath,
-		"REQUESTS_CA_BUNDLE="+caPath,
-		"SSL_CERT_FILE="+caPath,
-		"DENO_CERT="+caPath,           // for deno, which does not read SSL_CERT_FILE
-		"NODE_EXTRA_CA_CERTS="+caPath, // for bun, which does not read SSL_CERT_FILE
-		"_JAVA_OPTIONS=-Djavax.net.ssl.trustStore="+caPathPKCS12,
-		"JDK_JAVA_OPTIONS=-Djavax.net.ssl.trustStore="+caPathPKCS12,
-		"NODE_EXTRA_CA_CERTS="+caPath,
 	)
 
-	// get the name of the environment variable that openssl is configured to read
-	// if openssl is not installed or cannot be loaded then this gracefully fails with empty
-	// return value
-	if opensslenv := opensslpaths.DefaultCertFileEnv(); opensslenv != "" {
-		env = append(env, opensslenv+"="+caPath)
-		verbosef("openssl is installed and configured to read %q", opensslenv)
-	}
-
-	if opensslenv := opensslpaths.DefaultCertDirEnv(); opensslenv != "" {
-		env = append(env, opensslenv+"="+tempdir)
-		verbosef("openssl is installed and configured to read %q", opensslenv)
-	}
-
-	verbose("running subcommand now ================")
+	slog.Debug("running subcommand now ================")
 
 	// start sending packets to the process
 	toSubprocess := make(chan []byte, 1000)
 	go copyToDevice(ctx, tun, toSubprocess)
 
-	verbosef("listening on %v", args.Tun)
+	slog.Debug(fmt.Sprintf("listening on %v", args.Tun))
 
 	// the application-level thing is the mux, which distributes new connections according to patterns
 	var mux mux
@@ -544,117 +383,30 @@ func Main() error {
 			payload := make([]byte, link.Attrs().MTU)
 			n, err := conn.Read(payload)
 			if err == net.ErrClosed {
-				verbose("UDP connection closed, exiting the read loop")
+				slog.Debug("UDP connection closed, exiting the read loop")
 				break
 			}
 			if err != nil {
-				verbosef("error reading udp packet with conn.ReadFrom: %v, ignoring", err)
+				slog.Debug(fmt.Sprintf("error reading udp packet with conn.ReadFrom: %v, ignoring", err))
 				continue
 			}
 
-			verbosef("read a UDP packet with %d bytes", n)
+			slog.Debug(fmt.Sprintf("read a UDP packet with %d bytes", n))
 
 			// handle the DNS query asynchronously
 			go handleDNS(context.Background(), conn, payload)
 		}
 	})
 
-	// create the transport that will proxy intercepted connections out to the world
-	var roundTripper http.RoundTripper = &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			if network != "tcp" {
-				return nil, fmt.Errorf("network %q was requested of dialer pinned to tcp", network)
-			}
-			var dialTo string
-			dialTo, ok := ctx.Value(dialToContextKey).(string)
-			if !ok {
-				return nil, fmt.Errorf("context on proxied request was missing dialTo key")
-			}
-
-			// In order for processes in the network namespace to reach "localhost" in the host's
-			// network they use "host.httptap.local" or 169.254.77.65. Here we route request to
-			// those addresses to 127.0.0.1.
-			dialTo = strings.Replace(dialTo, specialHostName, "127.0.0.1", 1)
-			dialTo = strings.Replace(dialTo, specialHostIP, "127.0.0.1", 1)
-
-			verbosef("pinned dialer ignoring %q and dialing %v", address, dialTo)
-			return net.Dial("tcp", dialTo)
-		},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          5,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-	}
-
-	// set up middlewares for HAR file logging if requested
-	if args.DumpHAR != "" {
-		// open the file right away so that filesystem errors get surfaced as soon as possible
-		f, err := os.Create(args.DumpHAR)
-		if err != nil {
-			log.Printf("error opening HAR file for writing: %v", err)
-		}
-		defer f.Close()
-
-		// add the HAR middleware
-		harlogger := harlog.Transport{
-			Transport: roundTripper,
-			UnusualError: func(err error) error {
-				verbosef("error in HAR log capture: %v, ignoring", err)
-				return nil
-			},
-		}
-
-		roundTripper = &harlogger
-
-		// write the HAR log at program termination
-		defer func() {
-			err := json.NewEncoder(f).Encode(harlogger.HAR())
-			if err != nil {
-				verbosef("error serializing HAR output: %v, ignoring", err)
-			}
-		}()
-	}
-
-	// intercept TCP connections on requested HTTP ports and treat as HTTP
-	for _, port := range args.HTTPPorts {
-		mux.HandleTCP(fmt.Sprintf(":%d", port), func(conn net.Conn) {
-			proxyHTTP(roundTripper, conn)
-		})
-	}
-
-	// intercept TCP connections on requested HTTPS ports and treat as HTTPS
-	for _, port := range args.HTTPSPorts {
-		mux.HandleTCP(fmt.Sprintf(":%d", port), func(conn net.Conn) {
-			proxyHTTPS(roundTripper, conn, ca)
-		})
-	}
-
 	// listen for other TCP connections and proxy to the world
 	mux.HandleTCP("*", func(conn net.Conn) {
 		dst := conn.LocalAddr().String()
-
-		// In order for processes in the network namespace to reach "localhost" in the host's
-		// network they use "host.httptap.local" or 169.254.77.65. Here we route request to
-		// those addresses to 127.0.0.1.
-		dst = strings.Replace(dst, specialHostName, "127.0.0.1", 1)
-		dst = strings.Replace(dst, specialHostIP, "127.0.0.1", 1)
-
 		proxyConn("tcp", dst, conn)
 	})
 
 	// listen for other UDP connections and proxy to the world
 	mux.HandleUDP("*", func(conn net.Conn) {
 		dst := conn.LocalAddr().String()
-
-		// In order for processes in the network namespace to reach "localhost" in the host's
-		// network they use "host.httptap.local" or 169.254.77.65. Here we route request to
-		// those addresses to 127.0.0.1.
-		dst = strings.Replace(dst, specialHostName, "127.0.0.1", 1)
-		dst = strings.Replace(dst, specialHostIP, "127.0.0.1", 1)
-
 		proxyConn("udp", dst, conn)
 	})
 
@@ -687,10 +439,10 @@ func Main() error {
 		tcpForwarder := tcp.NewForwarder(s, 0, maxInFlight, func(r *tcp.ForwarderRequest) {
 			// remote address is the IP address of the subprocess
 			// local address is IP address that the subprocess was trying to reach
-			verbosef("at TCP forwarder: %v:%v => %v:%v",
-				r.ID().RemoteAddress, r.ID().RemotePort,
-				r.ID().LocalAddress, r.ID().LocalPort)
-
+			slog.Debug("at TCP forwarder",
+				"from", fmt.Sprintf("%v:%v", r.ID().RemoteAddress.String(), r.ID().RemotePort),
+				"to", fmt.Sprintf("%v:%v", r.ID().LocalAddress.String(), r.ID().LocalPort),
+			)
 			// dispatch the request via the mux
 			go mux.notifyTCP(&tcpRequest{r, new(waiter.Queue)})
 		})
@@ -698,17 +450,16 @@ func Main() error {
 		// TODO: this UDP forwarder sometimes only ever processes one UDP packet, other times it keeps going... :/
 		// create the UDP forwarder, which accepts UDP packets and notifies the mux
 		udpForwarder := udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
-			// remote address is the IP address of the subprocess
-			// local address is IP address that the subprocess was trying to reach
-			verbosef("at UDP forwarder: %v:%v => %v:%v",
-				r.ID().RemoteAddress, r.ID().RemotePort,
-				r.ID().LocalAddress, r.ID().LocalPort)
+			slog.Debug("at UDP forwarder",
+				"from", fmt.Sprintf("%v:%v", r.ID().RemoteAddress.String(), r.ID().RemotePort),
+				"to", fmt.Sprintf("%v:%v", r.ID().LocalAddress.String(), r.ID().LocalPort),
+			)
 
 			// create an endpoint for responding to this packet -- unlike TCP we do this right away because there is no SYN+ACK to decide whether to send
 			var wq waiter.Queue
 			ep, err := r.CreateEndpoint(&wq)
 			if err != nil {
-				verbosef("error accepting connection: %v", err)
+				slog.Debug(fmt.Sprintf("error accepting connection: %v", err))
 				return
 			}
 
@@ -720,11 +471,11 @@ func Main() error {
 		s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
 		s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
 		s.SetTransportProtocolHandler(icmp.ProtocolNumber4, func(id stack.TransportEndpointID, pb *stack.PacketBuffer) bool {
-			verbosef("got icmp packet %v => %v", id.RemoteAddress, id.LocalAddress)
+			slog.Debug(fmt.Sprintf("got icmp packet %v => %v", id.RemoteAddress, id.LocalAddress))
 			return false // this means the packet was handled and no error handler needs to be invoked
 		})
 		s.SetTransportProtocolHandler(icmp.ProtocolNumber6, func(id stack.TransportEndpointID, pb *stack.PacketBuffer) bool {
-			verbosef("got icmp6 packet %v => %v", id.RemoteAddress, id.LocalAddress)
+			slog.Debug(fmt.Sprintf("got icmp6 packet %v => %v", id.RemoteAddress, id.LocalAddress))
 			return false // this means the packet was handled and no error handler needs to be invoked
 		})
 
@@ -763,34 +514,33 @@ func Main() error {
 		return fmt.Errorf("invalid stack %q; valid choices are 'gvisor' or 'homegrown'", args.Stack)
 	}
 
-	verbosef("launching third stage targetting uid %d, gid %d...", args.UID, args.GID)
+	slog.Debug(fmt.Sprintf("launching third stage targetting uid %d, gid %d...", args.UID, args.GID))
 
 	// launch the third stage in a second user namespace, this time with mappings reversed
 	cmd := exec.Command("/proc/self/exe")
 	cmd.Args = append([]string{
 		"httptap.stage.3",
 		"--uid", strconv.Itoa(args.UID),
-		"--gid", strconv.Itoa(args.GID), "--"},
+		"--gid", strconv.Itoa(args.GID), "--",
+	},
 		args.Command...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = env
 
-	if !args.NoNewUserNamespace {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags: syscall.CLONE_NEWUSER,
-			UidMappings: []syscall.SysProcIDMap{{
-				ContainerID: args.UID,
-				HostID:      0,
-				Size:        1,
-			}},
-			GidMappings: []syscall.SysProcIDMap{{
-				ContainerID: args.GID,
-				HostID:      0,
-				Size:        1,
-			}},
-		}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUSER,
+		UidMappings: []syscall.SysProcIDMap{{
+			ContainerID: args.UID,
+			HostID:      0,
+			Size:        1,
+		}},
+		GidMappings: []syscall.SysProcIDMap{{
+			ContainerID: args.GID,
+			HostID:      0,
+			Size:        1,
+		}},
 	}
 
 	err = cmd.Start()
@@ -809,7 +559,7 @@ func Main() error {
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
-	err := Main()
+	err := run(context.Background())
 	if err != nil {
 		// if we exit due to a subprocess returning with non-zero exit code then do not
 		// print any extraneous output but do exit with the same code

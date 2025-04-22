@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/google/gopacket"
@@ -46,12 +47,12 @@ func (s *udpStack) handlePacket(ipv4 *layers.IPv4, udp *layers.UDP, payload []by
 	}
 
 	// forward the data to application-level listeners
-	verbosef("got %d udp bytes to %v:%v, delivering to application", len(udp.Payload), ipv4.DstIP, udp.DstPort)
+	slog.Debug(fmt.Sprintf("got %d udp bytes to %v:%v, delivering to application", len(udp.Payload), ipv4.DstIP, udp.DstPort))
 
 	src := net.UDPAddr{IP: ipv4.SrcIP, Port: int(udp.SrcPort)}
 	dst := net.UDPAddr{IP: ipv4.DstIP, Port: int(udp.DstPort)}
 
-	verbosef("udp delivery for homegrown stack not implemented")
+	slog.Debug(fmt.Sprintf("udp delivery for homegrown stack not implemented"))
 
 	_ = src
 	_ = dst
@@ -82,7 +83,7 @@ func serializeUDP(ipv4 *layers.IPv4, udp *layers.UDP, payload []byte, tmp gopack
 
 	err = ipv4.SerializeTo(tmp, opts)
 	if err != nil {
-		errorf("error serializing IP part of packet: %v", err)
+		slog.Error("error serializing IP part of packet", "err", err)
 	}
 
 	return tmp.Bytes(), nil
@@ -122,7 +123,7 @@ func (r *udpStackResponder) Write(payload []byte) (int, error) {
 	r.udpheader.SetNetworkLayerForChecksum(r.ipv4header)
 
 	// log
-	verbosef("sending udp packet to subprocess: %s", summarizeUDP(r.ipv4header, r.udpheader, payload))
+	slog.Debug(fmt.Sprintf("sending udp packet to subprocess: %s", summarizeUDP(r.ipv4header, r.udpheader, payload)))
 
 	// serialize the data
 	packet, err := serializeUDP(r.ipv4header, r.udpheader, payload, r.stack.buf)

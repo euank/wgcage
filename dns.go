@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -67,7 +68,7 @@ func notifyDNSWatchers(call *dnsCall) {
 	dnsMu.Lock()
 	defer dnsMu.Unlock()
 
-	verbosef("notifying DNS watchers (%d query/response pairs)", len(call.queries))
+	slog.Debug("notifying DNS watchers", "pairs", len(call.queries))
 
 	for _, w := range dnsWatchers {
 		w(call)
@@ -79,19 +80,19 @@ func handleDNS(ctx context.Context, w io.Writer, payload []byte) {
 	var req dns.Msg
 	err := req.Unpack(payload)
 	if err != nil {
-		errorf("error unpacking dns packet: %v, ignoring", err)
+		slog.Error("error unpacking dns packet: ignoring", "err", err)
 		return
 	}
 
 	if req.Opcode != dns.OpcodeQuery {
-		errorf("ignoring a dns query with non-query opcode (%v)", req.Opcode)
+		slog.Error("ignoring a dns query with non-query opcode", "opcode", req.Opcode)
 		return
 	}
 
 	// resolve the query
 	rrs, err := handleDNSQuery(ctx, &req)
 	if err != nil {
-		verbosef("DNS query returned: %v, sending a response with empty answer", err)
+		slog.Debug("DNS query returned, sending a response with empty answer", "err", err)
 		// do not abort here, continue on and send a reply with no answer
 	}
 
@@ -102,15 +103,15 @@ func handleDNS(ctx context.Context, w io.Writer, payload []byte) {
 	// serialize the response
 	buf, err := resp.Pack()
 	if err != nil {
-		errorf("error serializing dns response: %v, abandoning...", err)
+		slog.Error("error serializing dns response, abandoning...", "err", err)
 		return
 	}
 
 	// always send the entire buffer in a single Write() since UDP writes one packet per call to Write()
-	verbosef("responding to DNS request with %d bytes...", len(buf))
+	slog.Debug("responding to DNS request", "bytes", len(buf))
 	_, err = w.Write(buf)
 	if err != nil {
-		errorf("error writing dns response: %v, abandoning...", err)
+		slog.Error("error writing dns response, abandoning...", "err", err)
 		return
 	}
 }
@@ -324,7 +325,7 @@ func handleDNSQuery(ctx context.Context, req *dns.Msg) ([]dns.RR, error) {
 
 	question := req.Question[0]
 	questionType := dnsTypeCode(question.Qtype)
-	verbosef("got dns request for %v (%v)", question.Name, questionType)
+	slog.Debug("got dns request for", "q", question.Name, "t", questionType)
 
 	// the DNS call will be sent to watchers later
 	var call dnsCall
@@ -349,7 +350,7 @@ func handleDNSQuery(ctx context.Context, req *dns.Msg) ([]dns.RR, error) {
 			answers: ips,
 		})
 
-		verbosef("resolved %v to %v with default resolver", question.Name, ips)
+		slog.Debug("resolved A with default resolver", "q", question.Name, "ips", ips)
 
 		var rrs []dns.RR
 		for _, ip := range ips {
@@ -377,7 +378,7 @@ func handleDNSQuery(ctx context.Context, req *dns.Msg) ([]dns.RR, error) {
 			answers: ips,
 		})
 
-		verbosef("resolved %v to %v with default resolver", question.Name, ips)
+		slog.Debug("resolved AAAA with default resolver", "q", question.Name, "ips", ips)
 
 		var rrs []dns.RR
 		for _, ip := range ips {
@@ -394,7 +395,7 @@ func handleDNSQuery(ctx context.Context, req *dns.Msg) ([]dns.RR, error) {
 		return rrs, nil
 	}
 
-	verbosef("proxying %s request to upstream DNS server...", questionType)
+	slog.Debug("proxying request to upstream DNS server...", "t", questionType)
 
 	// proxy the request to another server
 	request := new(dns.Msg)
@@ -408,7 +409,7 @@ func handleDNSQuery(ctx context.Context, req *dns.Msg) ([]dns.RR, error) {
 		return nil, fmt.Errorf("error in DNS message exchange: %w", err)
 	}
 
-	verbosef("got answer from upstream dns server with %d answers", len(response.Answer))
+	slog.Debug("got answer(s) from upstream dns server", "num", len(response.Answer))
 
 	// note that we might have 0 answers here: this means there were no records for the query, which is not an error
 	return response.Answer, nil

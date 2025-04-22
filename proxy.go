@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 )
 
@@ -31,14 +33,14 @@ func proxyBytes(w io.Writer, r io.Reader) {
 		}
 		if err != nil {
 			// how to indicate to outside world that the read failed?
-			errorf("error reading in proxyBytes: %v, abandoning", err)
+			slog.Error(fmt.Sprintf("error reading in proxyBytes: %v, abandoning", err))
 			return
 		}
 
 		// send packet to channel, drop on failure
 		_, err = w.Write(buf[:n])
 		if err != nil {
-			errorf("error writing in proxyBytes: %v, dropping %d bytes", err, n)
+			slog.Error(fmt.Sprintf("error writing in proxyBytes: %v, dropping %d bytes", err, n))
 		}
 	}
 }
