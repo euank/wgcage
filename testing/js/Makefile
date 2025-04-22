@@ -1,2 +1,0 @@
-get:
-	node get.js
