@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 
@@ -65,4 +67,27 @@ func (wg *wireguardProxy) ProxyConn(network, addr string, subprocess net.Conn) {
 	}
 	go proxyBytes(subprocess, conn)
 	go proxyBytes(conn, subprocess)
+}
+
+// proxyBytes copies data between the world and the subprocess
+func proxyBytes(w io.Writer, r io.Reader) {
+	buf := make([]byte, 1<<20)
+	for {
+		n, err := r.Read(buf)
+		if err == io.EOF {
+			// how to indicate to outside world that we're done?
+			return
+		}
+		if err != nil {
+			// how to indicate to outside world that the read failed?
+			slog.Error(fmt.Sprintf("error reading in proxyBytes: %v, abandoning", err))
+			return
+		}
+
+		// send packet to channel, drop on failure
+		_, err = w.Write(buf[:n])
+		if err != nil {
+			slog.Error(fmt.Sprintf("error writing in proxyBytes: %v, dropping %d bytes", err, n))
+		}
+	}
 }

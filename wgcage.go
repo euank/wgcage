@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -353,124 +352,107 @@ func run(ctx context.Context) error {
 
 	slog.Debug(fmt.Sprintf("listening on %v", args.Tun))
 
-	// the application-level thing is the mux, which distributes new connections according to patterns
-	var mux mux
-
-	// listen for other TCP connections and proxy to the world
-	mux.HandleTCP("*", func(conn net.Conn) {
-		dst := conn.LocalAddr().String()
-		proxy.ProxyConn("tcp", dst, conn)
+	// create the stack with udp and tcp protocols
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 	})
 
-	// listen for other UDP connections and proxy to the world
-	mux.HandleUDP("*", func(conn net.Conn) {
-		dst := conn.LocalAddr().String()
-		proxy.ProxyConn("tcp", dst, conn)
+	// create a link endpoint based on the TUN device
+	endpoint, err := fdbased.New(&fdbased.Options{
+		FDs: []int{int(tun.ReadWriteCloser.(*os.File).Fd())},
+		MTU: uint32(link.Attrs().MTU),
 	})
-
-	switch strings.ToLower(args.Stack) {
-	case "homegrown":
-		// instantiate the tcp and udp stacks
-		tcpstack := newTCPStack(&mux, toSubprocess)
-		udpstack := newUDPStack(&mux, toSubprocess)
-
-		// start reading packets from the TUN device
-		go readFromDevice(ctx, tun, tcpstack, udpstack)
-	case "gvisor":
-		// create the stack with udp and tcp protocols
-		s := stack.New(stack.Options{
-			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
-		})
-
-		// create a link endpoint based on the TUN device
-		endpoint, err := fdbased.New(&fdbased.Options{
-			FDs: []int{int(tun.ReadWriteCloser.(*os.File).Fd())},
-			MTU: uint32(link.Attrs().MTU),
-		})
-		if err != nil {
-			return fmt.Errorf("error creating link from tun device file descriptor: %v", err)
-		}
-
-		// create the TCP forwarder, which accepts gvisor connections and notifies the mux
-		const maxInFlight = 100 // maximum simultaneous connections
-		tcpForwarder := tcp.NewForwarder(s, 0, maxInFlight, func(r *tcp.ForwarderRequest) {
-			// remote address is the IP address of the subprocess
-			// local address is IP address that the subprocess was trying to reach
-			slog.Debug("at TCP forwarder",
-				"from", fmt.Sprintf("%v:%v", r.ID().RemoteAddress.String(), r.ID().RemotePort),
-				"to", fmt.Sprintf("%v:%v", r.ID().LocalAddress.String(), r.ID().LocalPort),
-			)
-			// dispatch the request via the mux
-			go mux.notifyTCP(&tcpRequest{r, new(waiter.Queue)})
-		})
-
-		// TODO: this UDP forwarder sometimes only ever processes one UDP packet, other times it keeps going... :/
-		// create the UDP forwarder, which accepts UDP packets and notifies the mux
-		udpForwarder := udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
-			slog.Debug("at UDP forwarder",
-				"from", fmt.Sprintf("%v:%v", r.ID().RemoteAddress.String(), r.ID().RemotePort),
-				"to", fmt.Sprintf("%v:%v", r.ID().LocalAddress.String(), r.ID().LocalPort),
-			)
-
-			// create an endpoint for responding to this packet -- unlike TCP we do this right away because there is no SYN+ACK to decide whether to send
-			var wq waiter.Queue
-			ep, err := r.CreateEndpoint(&wq)
-			if err != nil {
-				slog.Debug(fmt.Sprintf("error accepting connection: %v", err))
-				return
-			}
-
-			// dispatch the request via the mux
-			go mux.notifyUDP(gonet.NewUDPConn(&wq, ep))
-		})
-
-		// register the forwarders with the stack
-		s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
-		s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
-		s.SetTransportProtocolHandler(icmp.ProtocolNumber4, func(id stack.TransportEndpointID, pb *stack.PacketBuffer) bool {
-			slog.Debug(fmt.Sprintf("got icmp packet %v => %v", id.RemoteAddress, id.LocalAddress))
-			return false // this means the packet was handled and no error handler needs to be invoked
-		})
-		s.SetTransportProtocolHandler(icmp.ProtocolNumber6, func(id stack.TransportEndpointID, pb *stack.PacketBuffer) bool {
-			slog.Debug(fmt.Sprintf("got icmp6 packet %v => %v", id.RemoteAddress, id.LocalAddress))
-			return false // this means the packet was handled and no error handler needs to be invoked
-		})
-
-		// create the network interface -- tun2socks says this must happen *after* registering the TCP forwarder
-		nic := s.NextNICID()
-		er := s.CreateNIC(nic, endpoint)
-		if er != nil {
-			return fmt.Errorf("error creating NIC: %v", er)
-		}
-
-		// set promiscuous mode so that the forwarder receives packets not addressed to us
-		er = s.SetPromiscuousMode(nic, true)
-		if er != nil {
-			return fmt.Errorf("error activating promiscuous mode: %v", er)
-		}
-
-		// set spoofing mode so that we can send packets from any address
-		er = s.SetSpoofing(nic, true)
-		if er != nil {
-			return fmt.Errorf("error activating spoofing mode: %v", er)
-		}
-
-		// set up the route table so that we can send packets to the subprocess
-		s.SetRouteTable([]tcpip.Route{
-			{
-				Destination: header.IPv4EmptySubnet,
-				NIC:         nic,
-			},
-			{
-				Destination: header.IPv6EmptySubnet,
-				NIC:         nic,
-			},
-		})
-
-	default:
-		return fmt.Errorf("invalid stack %q; valid choices are 'gvisor' or 'homegrown'", args.Stack)
+	if err != nil {
+		return fmt.Errorf("error creating link from tun device file descriptor: %v", err)
 	}
+
+	// create the TCP forwarder, which accepts gvisor connections and notifies the mux
+	const maxInFlight = 100 // maximum simultaneous connections
+	tcpForwarder := tcp.NewForwarder(s, 0, maxInFlight, func(r *tcp.ForwarderRequest) {
+		// remote address is the IP address of the subprocess
+		// local address is IP address that the subprocess was trying to reach
+		slog.Debug("at TCP forwarder",
+			"from", fmt.Sprintf("%v:%v", r.ID().RemoteAddress.String(), r.ID().RemotePort),
+			"to", fmt.Sprintf("%v:%v", r.ID().LocalAddress.String(), r.ID().LocalPort),
+		)
+		go func() {
+			req := &tcpRequest{r, new(waiter.Queue)}
+			conn, err := req.Accept()
+			if err != nil {
+				slog.Error("error accepting tcp", "err", err)
+			}
+			dst := conn.LocalAddr().String()
+			proxy.ProxyConn("tcp", dst, conn)
+		}()
+	})
+
+	// TODO: this UDP forwarder sometimes only ever processes one UDP packet, other times it keeps going... :/
+	// create the UDP forwarder, which accepts UDP packets and notifies the mux
+	udpForwarder := udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
+		slog.Debug("at UDP forwarder",
+			"from", fmt.Sprintf("%v:%v", r.ID().RemoteAddress.String(), r.ID().RemotePort),
+			"to", fmt.Sprintf("%v:%v", r.ID().LocalAddress.String(), r.ID().LocalPort),
+		)
+
+		// create an endpoint for responding to this packet -- unlike TCP we do this right away because there is no SYN+ACK to decide whether to send
+		var wq waiter.Queue
+		ep, err := r.CreateEndpoint(&wq)
+		if err != nil {
+			slog.Debug(fmt.Sprintf("error accepting connection: %v", err))
+			return
+		}
+
+		// dispatch the request via the mux
+		go func() {
+			conn := gonet.NewUDPConn(&wq, ep)
+			dst := conn.LocalAddr().String()
+			proxy.ProxyConn("udp", dst, conn)
+		}()
+	})
+
+	// register the forwarders with the stack
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+	s.SetTransportProtocolHandler(icmp.ProtocolNumber4, func(id stack.TransportEndpointID, pb *stack.PacketBuffer) bool {
+		slog.Debug(fmt.Sprintf("got icmp packet %v => %v", id.RemoteAddress, id.LocalAddress))
+		return false // this means the packet was handled and no error handler needs to be invoked
+	})
+	s.SetTransportProtocolHandler(icmp.ProtocolNumber6, func(id stack.TransportEndpointID, pb *stack.PacketBuffer) bool {
+		slog.Debug(fmt.Sprintf("got icmp6 packet %v => %v", id.RemoteAddress, id.LocalAddress))
+		return false // this means the packet was handled and no error handler needs to be invoked
+	})
+
+	// create the network interface -- tun2socks says this must happen *after* registering the TCP forwarder
+	nic := s.NextNICID()
+	er := s.CreateNIC(nic, endpoint)
+	if er != nil {
+		return fmt.Errorf("error creating NIC: %v", er)
+	}
+
+	// set promiscuous mode so that the forwarder receives packets not addressed to us
+	er = s.SetPromiscuousMode(nic, true)
+	if er != nil {
+		return fmt.Errorf("error activating promiscuous mode: %v", er)
+	}
+
+	// set spoofing mode so that we can send packets from any address
+	er = s.SetSpoofing(nic, true)
+	if er != nil {
+		return fmt.Errorf("error activating spoofing mode: %v", er)
+	}
+
+	// set up the route table so that we can send packets to the subprocess
+	s.SetRouteTable([]tcpip.Route{
+		{
+			Destination: header.IPv4EmptySubnet,
+			NIC:         nic,
+		},
+		{
+			Destination: header.IPv6EmptySubnet,
+			NIC:         nic,
+		},
+	})
 
 	slog.Debug(fmt.Sprintf("launching third stage targetting uid %d, gid %d...", args.UID, args.GID))
 
