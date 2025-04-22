@@ -16,7 +16,7 @@ Let's start with curl:
   --wg-public-key "<base64 wireguard server public key>" \
   --wg-private-key-file "/path/to/wireguard/private/key" \
   --wg-address "10.101.107.2" \
-  curl https://api.myip.com
+  -- curl -4 https://api.myip.com
 
 {"ip": "<wireguard server ip>"}
 ```
