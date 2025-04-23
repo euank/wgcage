@@ -1,4 +1,4 @@
-module github.com/euank/wgcage
+module github.com/euank/wirecage
 
 go 1.23.1
 

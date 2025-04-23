@@ -15,7 +15,7 @@ import (
 	"syscall"
 
 	"github.com/alexflint/go-arg"
-	"github.com/euank/wgcage/pkg/overlay"
+	"github.com/euank/wirecage/pkg/overlay"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -40,7 +40,7 @@ const (
 
 func run(ctx context.Context) error {
 	var args struct {
-		Tun       string `default:"wgcage" help:"name of the TUN device that will be created"`
+		Tun       string `default:"wirecage" help:"name of the TUN device that will be created"`
 		Subnet    string `default:"10.1.2.100/24" help:"IP address of the network interface that the subprocess will see"`
 		Gateway   string `default:"10.1.2.1" help:"IP address of the gateway that intercepts and proxies network packets"`
 		UID       int
@@ -340,8 +340,8 @@ func run(ctx context.Context) error {
 	// set up environment variables for the subprocess
 	env := append(
 		os.Environ(),
-		"PS1=WGCAGE # ",
-		"WGCAGE=1",
+		"PS1=wirecage # ",
+		"wirecage=1",
 	)
 
 	slog.Debug("running subcommand now ================")
