@@ -19,7 +19,7 @@ type wireguardProxy struct {
 	tnet *netstack.Net
 }
 
-func newWgProxy(ourIP, privateKey, pubKey string, endpoint string) (*wireguardProxy, error) {
+func newWgProxy(ourIP, privateKey, publicKey string, endpoint string) (*wireguardProxy, error) {
 	tun, tnet, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr(ourIP)},
 		[]netip.Addr{netip.MustParseAddr("1.1.1.1")},
@@ -28,21 +28,27 @@ func newWgProxy(ourIP, privateKey, pubKey string, endpoint string) (*wireguardPr
 	if err != nil {
 		return nil, err
 	}
+
+	var privKey device.NoisePrivateKey
 	privKeyBytes, err := base64.StdEncoding.DecodeString(privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid priv key: %w", err)
 	}
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKey)
+	copy(privKey[:], privKeyBytes)
+
+	var pubKey device.NoisePublicKey
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid priv key: %w", err)
 	}
+	copy(pubKey[:], pubKeyBytes)
 
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(0, "[WG]"))
 
 	err = dev.IpcSet(fmt.Sprintf(`private_key=%s
 public_key=%s
 allowed_ip=0.0.0.0/0
-endpoint=%s`, hex.EncodeToString(privKeyBytes), hex.EncodeToString(pubKeyBytes), endpoint))
+endpoint=%s`, hex.EncodeToString(privKey[:]), hex.EncodeToString(pubKey[:]), endpoint))
 	if err != nil {
 		return nil, err
 	}
