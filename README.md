@@ -8,14 +8,27 @@ No root required (assuming unprivileged user namespaces are enabled).
 
 You can run any command and force it to route through wireguard.
 
-Let's start with curl:
+Want to run firefox through a vpn without affecting your other software? Put it in a wgcage:
 
 ```shell
 ./wgcage \
   --wg-endpoint "<wireguard server endpoint>" \
   --wg-public-key "<base64 wireguard server public key>" \
   --wg-private-key-file "/path/to/wireguard/private/key" \
-  --wg-address "10.101.107.2" \
+  --wg-address "<our wireguard ip>" \
+  -- firefox
+```
+
+Create a profile and browse around, and you'll see that you appear to be coming from your wireguard server's IP :)
+
+You can also run simple tools like curl:
+
+```shell
+./wgcage \
+  --wg-endpoint "<wireguard server endpoint>" \
+  --wg-public-key "<base64 wireguard server public key>" \
+  --wg-private-key-file "/path/to/wireguard/private/key" \
+  --wg-address "<our wireguard ip>" \
   -- curl -4 https://api.myip.com
 
 {"ip": "<wireguard server ip>"}
