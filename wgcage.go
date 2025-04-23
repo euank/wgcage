@@ -381,6 +381,8 @@ func run(ctx context.Context) error {
 			conn, err := req.Accept()
 			if err != nil {
 				slog.Error("error accepting tcp", "err", err)
+				r.Complete(true)
+				return
 			}
 			dst := conn.LocalAddr().String()
 			proxy.ProxyConn("tcp", dst, conn)
@@ -399,7 +401,7 @@ func run(ctx context.Context) error {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
-			slog.Debug(fmt.Sprintf("error accepting connection: %v", err))
+			slog.Error("error creating udp endpoint", "err", err)
 			return
 		}
 
