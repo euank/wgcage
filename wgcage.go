@@ -332,7 +332,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("could not read %s: %w", args.WgPrivKeyFile, err)
 	}
 	// create wireguard tun
-	proxy, err := newWgProxy(args.WgIP, string(privKey), args.WgPubKey, args.WgEndpoint)
+	proxy, err := newWgProxy(ctx, args.WgIP, string(privKey), args.WgPubKey, args.WgEndpoint)
 	if err != nil {
 		return fmt.Errorf("could not make wg prox: %w", err)
 	}

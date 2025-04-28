@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -9,9 +10,9 @@ import (
 	"net"
 	"net/netip"
 
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"go.euank.com/wireguard/conn"
+	"go.euank.com/wireguard/device"
+	"go.euank.com/wireguard/tun/netstack"
 )
 
 type wireguardProxy struct {
@@ -19,7 +20,7 @@ type wireguardProxy struct {
 	tnet *netstack.Net
 }
 
-func newWgProxy(ourIP, privateKey, publicKey string, endpoint string) (*wireguardProxy, error) {
+func newWgProxy(ctx context.Context, ourIP, privateKey, publicKey string, endpoint string) (*wireguardProxy, error) {
 	tun, tnet, err := netstack.CreateNetTUN(
 		[]netip.Addr{netip.MustParseAddr(ourIP)},
 		[]netip.Addr{netip.MustParseAddr("1.1.1.1")},
@@ -43,9 +44,9 @@ func newWgProxy(ourIP, privateKey, publicKey string, endpoint string) (*wireguar
 	}
 	copy(pubKey[:], pubKeyBytes)
 
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(0, "[WG]"))
+	dev := device.NewDevice(ctx, tun, conn.NewDefaultBind(), slog.Default())
 
-	err = dev.IpcSet(fmt.Sprintf(`private_key=%s
+	err = dev.IpcSet(ctx, fmt.Sprintf(`private_key=%s
 public_key=%s
 allowed_ip=0.0.0.0/0
 endpoint=%s`, hex.EncodeToString(privKey[:]), hex.EncodeToString(pubKey[:]), endpoint))
@@ -53,7 +54,7 @@ endpoint=%s`, hex.EncodeToString(privKey[:]), hex.EncodeToString(pubKey[:]), end
 		return nil, err
 	}
 
-	err = dev.Up()
+	err = dev.Up(ctx)
 	if err != nil {
 		return nil, err
 	}
