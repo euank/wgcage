@@ -1,19 +1,19 @@
-/wgcage
+/wirecage
 .bin
 .build/
 .vscode/
-*.crt
-*.pem
-*.class
-*.har
 
 **/secrets/*
 !**/secrets/*.encrypted
 !**/secrets/*.go
 /out
 
-dist/
-good-examples/
-dumps/
-actual
-expected
+# Devenv
+.devenv*
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
