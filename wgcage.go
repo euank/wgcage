@@ -204,6 +204,16 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("--wg-private-key-file is required")
 	}
 
+	privKey, err := os.ReadFile(args.WgPrivKeyFile)
+	if err != nil {
+		return fmt.Errorf("could not read %s: %w", args.WgPrivKeyFile, err)
+	}
+	// create wireguard tun
+	proxy, err := newWgProxy(ctx, args.WgIP, string(privKey), args.WgPubKey, args.WgEndpoint)
+	if err != nil {
+		return fmt.Errorf("could not make wg prox: %w", err)
+	}
+
 	// lock the OS thread because network and mount namespaces are specific to a single OS thread
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -344,16 +354,6 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("error setting up overlay: %w", err)
 		}
 		defer mount.Remove()
-	}
-
-	privKey, err := os.ReadFile(args.WgPrivKeyFile)
-	if err != nil {
-		return fmt.Errorf("could not read %s: %w", args.WgPrivKeyFile, err)
-	}
-	// create wireguard tun
-	proxy, err := newWgProxy(ctx, args.WgIP, string(privKey), args.WgPubKey, args.WgEndpoint)
-	if err != nil {
-		return fmt.Errorf("could not make wg prox: %w", err)
 	}
 
 	// set up environment variables for the subprocess
