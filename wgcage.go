@@ -48,6 +48,7 @@ func run(ctx context.Context) error {
 		User      string `help:"run command as this user (username or id)"`
 		NoOverlay bool   `arg:"--no-overlay,env:HTTPTAP_NO_OVERLAY" help:"do not mount any overlay filesystems"`
 		Stack     string `arg:"env:HTTPTAP_STACK" default:"gvisor" help:"which tcp implementation to use: 'gvisor' or 'homegrown'"`
+		LogLevel  string `arg:"--log-level" default:"info" help:"log level (debug, info, warn, error)"`
 
 		WgPubKey      string `arg:"--wg-public-key" help:"wireguard server public key"`
 		WgPrivKeyFile string `arg:"--wg-private-key-file" help:"wireguard private key file"`
@@ -57,6 +58,24 @@ func run(ctx context.Context) error {
 		Command []string `arg:"positional"`
 	}
 	arg.MustParse(&args)
+
+	var logLevel slog.Level
+	switch strings.ToLower(args.LogLevel) {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn", "warning":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		return fmt.Errorf("invalid log level %q, must be one of: debug, info, warn, error", args.LogLevel)
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
 
 	if len(args.Command) == 0 {
 		args.Command = []string{"/bin/sh"}
